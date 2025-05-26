@@ -40,28 +40,30 @@ def fetch_ohlcv_data() -> Optional[pd.DataFrame]:
         print(f"OHLCV API request failed: {str(e)}")
         return None
 
-def fetch_order_book_data() -> Optional[pd.DataFrame]:
-    """Fetch order book data from CoinAPI with daily batches"""
+def fetch_order_book_data(batch_size: int = 20000, hours_per_batch: int = 3) -> Optional[pd.DataFrame]:
+    """Fetch order book data with memory-efficient batches"""
     cvd_rows = []
-    current_date = START_DATE
-    one_day = pd.Timedelta(days=1)
+    current_time = START_DATE
     
-    while current_date <= END_DATE:
-        day_end = current_date + one_day
-        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?limit=100000&time_start={current_date.isoformat()}&time_end={day_end.isoformat()}"
+    while current_time <= END_DATE:
+        batch_end = current_time + pd.Timedelta(hours=hours_per_batch)
+        if batch_end > END_DATE:
+            batch_end = END_DATE
+            
+        print(f"Fetching {current_time} to {batch_end}...")
+        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?limit={batch_size}&time_start={current_time.isoformat()}&time_end={batch_end.isoformat()}"
         
         try:
-            print(f"Fetching order book data for {current_date.date()}...")
             response = requests.get(url, headers=HEADERS)
             response.raise_for_status()
             book_data = response.json()
 
             if not isinstance(book_data, list):
-                print(f"Unexpected data format for {current_date.date()}")
-                current_date = day_end
+                print(f"Unexpected data format for {current_time}")
+                current_time = batch_end
                 continue
 
-            day_count = 0
+            batch_count = 0
             for book in book_data:
                 try:
                     if not isinstance(book, dict) or 'time_exchange' not in book:
@@ -71,31 +73,41 @@ def fetch_order_book_data() -> Optional[pd.DataFrame]:
                     if pd.isna(timestamp):
                         continue
                     
-                    bid_vol = sum(float(level['size']) for level in book['bids'])
-                    ask_vol = sum(float(level['size']) for level in book['asks'])
-                    
-                    cvd_rows.append({
-                        'time': timestamp,
-                        'delta': bid_vol - ask_vol,
-                        'bid_vol': bid_vol,
-                        'ask_vol': ask_vol
-                    })
-                    day_count += 1
+                    # Process only if within batch time range
+                    if timestamp >= current_time and timestamp <= batch_end:
+                        bid_vol = sum(float(level['size']) for level in book.get('bids', []))
+                        ask_vol = sum(float(level['size']) for level in book.get('asks', []))
+                        
+                        cvd_rows.append({
+                            'time': timestamp,
+                            'delta': bid_vol - ask_vol,
+                            'bid_vol': bid_vol,
+                            'ask_vol': ask_vol
+                        })
+                        batch_count += 1
                     
                 except (KeyError, TypeError, ValueError) as e:
                     print(f"Skipping invalid book entry: {str(e)}")
                     continue
             
-            print(f"Processed {day_count} order book entries for {current_date.date()}")
+            print(f"Processed {batch_count} order book entries")
             
+            # Clear memory after each batch
+            if len(cvd_rows) > 10000:
+                pd.DataFrame(cvd_rows).to_parquet(f'cache/orderbook_temp_{current_time.timestamp()}.parquet')
+                cvd_rows = []
+                
         except requests.exceptions.RequestException as e:
-            print(f"Failed to fetch data for {current_date.date()}: {str(e)}")
+            print(f"Failed to fetch data: {str(e)}")
+            return None
         
-        current_date = day_end
+        current_time = batch_end
     
+    # Combine all temp files if any
     if cvd_rows:
         return pd.DataFrame(cvd_rows).set_index('time')
-    print("No valid order book data found for the entire period")
+    
+    print("No valid order book data found")
     return None
 
 def merge_market_data(ohlcv_df: pd.DataFrame, order_book_df: Optional[pd.DataFrame]) -> pd.DataFrame:
