@@ -37,25 +37,48 @@ class RangePOIStrategy(BaseStrategy):
         
     def calculate_vwap_bands(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate VWAP ±1 levels using daily anchor VWAP
+        Calculate VWAP ±1 levels using daily anchor VWAP (TradingView style)
         """
-        # Calculate daily VWAP
-        daily_df = df.groupby(pd.Grouper(freq='D')).apply(
-            lambda x: (x['high'] + x['low'] + x['close']).mean() / 3
-        )
-        daily_vwap = daily_df.reindex(df.index, method='ffill')
+        # Calculate daily VWAP and standard deviation bands like TradingView
+        def calculate_daily_vwap_bands(group):
+            # Calculate typical price
+            typical_price = (group['high'] + group['low'] + group['close']) / 3
+            volume = group['volume']
+            
+            # Calculate cumulative VWAP
+            cum_vol = volume.cumsum()
+            cum_tp_vol = (typical_price * volume).cumsum()
+            vwap = cum_tp_vol / cum_vol
+            
+            # Calculate standard deviation from VWAP (TradingView method)
+            # Sum of squared deviations weighted by volume
+            squared_deviations = (typical_price - vwap) ** 2
+            cum_sq_dev_vol = (squared_deviations * volume).cumsum()
+            variance = cum_sq_dev_vol / cum_vol
+            std_dev = np.sqrt(variance)
+            
+            # Standard deviation bands with multiplier = 1
+            multiplier = 1.0
+            upper_band = vwap + (multiplier * std_dev)
+            lower_band = vwap - (multiplier * std_dev)
+            
+            return pd.DataFrame({
+                'daily_vwap': vwap,
+                'vwap_std': std_dev,
+                'vwap_upper': upper_band,
+                'vwap_lower': lower_band
+            }, index=group.index)
         
-        # Calculate std dev of daily VWAP (14 day lookback)
-        df['daily_vwap'] = daily_vwap
-        df['vwap_std'] = df['daily_vwap'].rolling('14D').std()
+        # Group by day and calculate VWAP bands
+        daily_bands = df.groupby(pd.Grouper(freq='D')).apply(calculate_daily_vwap_bands)
+        daily_bands.index = daily_bands.index.droplevel(0)
         
-        # Set bands at VWAP ±1 std dev
-        df['vwap_upper'] = df['vwap'] + df['vwap_std'] 
-        df['vwap_lower'] = df['vwap'] - df['vwap_std']
+        # Merge back to original dataframe
+        df = df.join(daily_bands)
         
         # Debug print
         sample = df.iloc[-5:] if len(df) > 5 else df
-        print("\nDaily Anchor VWAP Bands Debug:")
+        print("\nDaily Anchor VWAP Bands Debug (TradingView style):")
         print(sample[['vwap', 'daily_vwap', 'vwap_std', 'vwap_upper', 'vwap_lower']])
         
         return df
