@@ -76,11 +76,6 @@ class RangePOIStrategy(BaseStrategy):
         # Merge back to original dataframe
         df = df.join(daily_bands)
         
-        # Debug print
-        sample = df.iloc[-5:] if len(df) > 5 else df
-        print("\nDaily Anchor VWAP Bands Debug (TradingView style):")
-        print(sample[['vwap', 'daily_vwap', 'vwap_std', 'vwap_upper', 'vwap_lower']])
-        
         return df
         
     def detect_trapped_delta(self, df: pd.DataFrame, i: int) -> bool:
@@ -149,6 +144,9 @@ class RangePOIStrategy(BaseStrategy):
                         # Ensure timestamp is in correct format
                         timestamp = pd.to_datetime(df.index[i])
                         ob_data = self.fetcher.fetch_order_book_data_at_time(timestamp)
+                        print(f"Fetcher returned: {ob_data}")
+                        print(f"Fetching OB for timestamp: {timestamp}, type: {type(timestamp)}")
+
                         
                         if ob_data and 'delta' in ob_data:
                             current_delta = ob_data['delta']
@@ -163,13 +161,14 @@ class RangePOIStrategy(BaseStrategy):
                 # Buy signal: at support with bullish confluence
                 if (current_delta > prev_delta and  # Delta increasing
                     self.detect_trapped_delta(df, i)):  # Absorption
-                    
+                    print(f"BUY! delta trapped at price={current_close:.2f}")
+
                     return 1  # Buy
                     
                 # Sell signal: at resistance with bearish confluence
                 elif (current_delta < prev_delta and  # Delta decreasing
                       self.detect_trapped_delta(df, i)):  # Absorption
-                      
+                    print(f"SELL! delta trapped at price={current_close:.2f}")
                     return -1  # Sell
                 
         return 0  # No signal

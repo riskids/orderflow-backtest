@@ -22,8 +22,6 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     
     # Debug print sample data
     sample = df.iloc[-5:] if len(df) > 5 else df
-    print("\nVWAP Calculation Debug:")
-    print(sample[['high', 'low', 'close', 'volume', 'typical_price', 'cumulative_vp', 'cumulative_vol']])
     
     # Handle days with no volume
     valid_volume = df['cumulative_vol'] > 0
@@ -32,9 +30,6 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
         df['cumulative_vp'] / df['cumulative_vol'],
         df['typical_price']  # Fallback to typical price if no volume
     )
-    
-    print("\nFinal VWAP Sample:")
-    print(df[['close', 'vwap']].tail())
     return df
 
 def calculate_volume_profile(df: pd.DataFrame, bins: int = 20) -> Tuple[float, float, float]:

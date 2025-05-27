@@ -45,74 +45,134 @@ class OrderBookFetcher:
     def __init__(self):
         pass
         
-    def fetch_order_book_data_at_time(self, timestamp: pd.Timestamp, window: int = 300) -> Optional[Dict]:
+    def fetch_order_book_data_at_time(self, timestamp: pd.Timestamp, window: int = 300, batch_size: int = 10000) -> Optional[Dict]:
         """
         Fetch order book data at specific timestamp with surrounding window (in seconds)
         Returns single data point with delta, bid_vol, ask_vol
+        Processes data in 30-minute batches for memory efficiency
         """
         start_time = timestamp - pd.Timedelta(seconds=window)
-        end_time = timestamp + pd.Timedelta(seconds=window)
+        end_time = timestamp
         
-        # Format timestamps to match CoinAPI's expected format (YYYY-MM-DDTHH:MM:SS.000Z)
-        date_str = timestamp.strftime('%Y-%m-%dT00:00:00.000Z')
-        start_str = start_time.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-        end_str = end_time.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?date={date_str}&time_start={start_str}&time_end={end_str}&limit=100000"
+        cvd_rows = []
+        current_time = start_time
+        total_batches = ((end_time - start_time).total_seconds() // (30 * 60)) + 1
+        batch_num = 1
         
-        try:
-            with tqdm(desc=f"Fetching order book at {timestamp}", unit="request") as pbar:
-                pbar.set_description("Making HTTP request...")
+        while current_time < end_time:
+            batch_end = current_time + pd.Timedelta(minutes=5)
+            if batch_end > end_time:
+                batch_end = end_time
+                
+            print(f"\nProcessing batch {batch_num}/{int(total_batches)}")
+            print(f"Time range: {current_time} to {batch_end}")
+                
+            date_str = current_time.strftime('%Y-%m-%dT00:00:00.0000000Z')
+            url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?date={date_str}&limit={batch_size}&time_start={current_time.strftime('%Y-%m-%dT%H:%M:%S.0000000Z')}&time_end={batch_end.strftime('%Y-%m-%dT%H:%M:%S.0000000Z')}&limit_levels=1"
+            
+            try:
                 response = requests.get(url, headers=HEADERS)
                 response.raise_for_status()
-                pbar.set_description("Parsing response...")
                 book_data = response.json()
 
                 if not isinstance(book_data, list):
-                    print(f"Unexpected data format for {timestamp}")
-                    return None
+                    print(f"Unexpected data format for batch {current_time}-{batch_end}")
+                    current_time = batch_end
+                    continue
 
-                bid_vol = 0
-                ask_vol = 0
-                count = 0
+                print(f"\nFirst book entry sample: {book_data[0] if book_data else 'Empty'}")  # Debug first entry
                 
-                pbar.set_description("Processing order book entries...")
-                pbar.total = len(book_data)
-                
-                for book in tqdm(book_data, desc="Processing", leave=False):
+                for book in book_data:
                     try:
-                        if not isinstance(book, dict) or 'time_exchange' not in book:
+                        if not isinstance(book, dict):
+                            print("Skipping non-dict book entry")
+                            continue
+                            
+                        if 'time_exchange' not in book:
+                            print("Skipping book entry without time_exchange")
                             continue
                             
                         book_time = pd.to_datetime(book.get('time_exchange'))
                         if pd.isna(book_time):
+                            print("Skipping book entry with invalid time")
                             continue
                         
-                        # Only use data close to our target timestamp
-                        if abs((book_time - timestamp).total_seconds()) <= window:
-                            bid_vol += sum(float(level['size']) for level in book.get('bids', []))
-                            ask_vol += sum(float(level['size']) for level in book.get('asks', []))
-                            count += 1
+                        bids = book.get('bids', [])
+                        asks = book.get('asks', [])
                         
-                    except (KeyError, TypeError, ValueError) as e:
-                        print(f"Skipping invalid book entry: {str(e)}")
+                        if not bids and not asks:
+                            print(f"Skipping empty book at {book_time}")
+                            continue
+                            
+                        # Calculate volumes with type checking
+                        bid_vol = 0.0
+                        ask_vol = 0.0
+                        
+                        for level in bids:
+                            try:
+                                bid_vol += float(level.get('size', 0))
+                            except (TypeError, ValueError) as e:
+                                print(f"Invalid bid size: {level.get('size')} - {str(e)}")
+                                
+                        for level in asks:
+                            try:
+                                ask_vol += float(level.get('size', 0))
+                            except (TypeError, ValueError) as e:
+                                print(f"Invalid ask size: {level.get('size')} - {str(e)}")
+                        
+                        if bid_vol == 0 and ask_vol == 0:
+                            print(f"Skipping zero-volume book at {book_time}")
+                            continue
+                            
+                        # Collect all data during batch processing
+                        cvd_rows.append({
+                            'time': book_time,
+                            'delta': bid_vol - ask_vol,
+                            'bid_vol': bid_vol,
+                            'ask_vol': ask_vol
+                        })
+                            
+                    except Exception as e:
+                        print(f"Error processing book entry: {str(e)}")
+                        print(f"Problematic book entry: {book}")
                         continue
-
-                if count == 0:
-                    return None
+                        
+                # Print batch CVD data
+                print("\nBatch CVD Summary:")
+                print(pd.DataFrame(cvd_rows[-10:]).to_string())  # Print last 10 entries
+                # print(book_data)  # Print last 10 entries
+                
+                # Clear memory after each batch
+                if len(cvd_rows) > 10000:
+                    pd.DataFrame(cvd_rows).to_parquet(f'cache/orderbook_temp_{current_time.timestamp()}.parquet')
+                    cvd_rows = []
                     
-                return {
-                    'time': timestamp,
-                    'delta': bid_vol - ask_vol,
-                    'bid_vol': bid_vol,
-                    'ask_vol': ask_vol
-                }
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Failed to fetch order book at {timestamp}: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to fetch batch {current_time}-{batch_end}: {str(e)}")
+                return None
+                
+            current_time = batch_end
+        
+        if not cvd_rows:
             return None
+            
+        # Combine all data and calculate totals
+        df = pd.DataFrame(cvd_rows)
+        matched = df[abs(df['time'] - timestamp) <= pd.Timedelta(seconds=window)]
+        
+        if matched.empty:
+            print("mathced empty")
+            return None
+            
+        return {
+            'time': timestamp,
+            'delta': matched['delta'].sum(),
+            'bid_vol': matched['bid_vol'].sum(),
+            'ask_vol': matched['ask_vol'].sum()
+        }
 
 
-def fetch_order_book_data(batch_size: int = 20000, hours_per_batch: int = 3) -> Optional[pd.DataFrame]:
+def fetch_order_book_data(batch_size: int = 10000, hours_per_batch: int = 1) -> Optional[pd.DataFrame]:
     """Fetch order book data with memory-efficient batches"""
     cvd_rows = []
     current_time = START_DATE
@@ -123,7 +183,8 @@ def fetch_order_book_data(batch_size: int = 20000, hours_per_batch: int = 3) -> 
             batch_end = END_DATE
             
         print(f"Fetching {current_time} to {batch_end}...")
-        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?limit={batch_size}&time_start={current_time.isoformat()}&time_end={batch_end.isoformat()}"
+        date_str = current_time.strftime('%Y-%m-%dT00:00:00.0000000Z')
+        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?date={date_str}&limit={batch_size}&time_start={current_time.strftime('%Y-%m-%dT%H:%M:%S.0000000Z')}&time_end={batch_end.strftime('%Y-%m-%dT%H:%M:%S.0000000Z')}"
         
         try:
             response = requests.get(url, headers=HEADERS)
