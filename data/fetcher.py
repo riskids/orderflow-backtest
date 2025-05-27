@@ -4,6 +4,7 @@ import numpy as np
 from typing import Optional, Dict
 from datetime import datetime
 from config.constants import COINAPI_KEY, SYMBOL, TIMEFRAME, START_DATE, END_DATE
+from tqdm import tqdm
 
 HEADERS = {'X-CoinAPI-Key': COINAPI_KEY}
 
@@ -52,49 +53,59 @@ class OrderBookFetcher:
         start_time = timestamp - pd.Timedelta(seconds=window)
         end_time = timestamp + pd.Timedelta(seconds=window)
         
-        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?limit=1000&time_start={start_time.isoformat()}&time_end={end_time.isoformat()}"
+        # Format timestamps to match CoinAPI's expected format (YYYY-MM-DDTHH:MM:SS.000Z)
+        date_str = timestamp.strftime('%Y-%m-%dT00:00:00.000Z')
+        start_str = start_time.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        end_str = end_time.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?date={date_str}&time_start={start_str}&time_end={end_str}&limit=100000"
         
         try:
-            response = requests.get(url, headers=HEADERS)
-            response.raise_for_status()
-            book_data = response.json()
+            with tqdm(desc=f"Fetching order book at {timestamp}", unit="request") as pbar:
+                pbar.set_description("Making HTTP request...")
+                response = requests.get(url, headers=HEADERS)
+                response.raise_for_status()
+                pbar.set_description("Parsing response...")
+                book_data = response.json()
 
-            if not isinstance(book_data, list):
-                print(f"Unexpected data format for {timestamp}")
-                return None
+                if not isinstance(book_data, list):
+                    print(f"Unexpected data format for {timestamp}")
+                    return None
 
-            bid_vol = 0
-            ask_vol = 0
-            count = 0
-            
-            for book in book_data:
-                try:
-                    if not isinstance(book, dict) or 'time_exchange' not in book:
-                        continue
-                        
-                    book_time = pd.to_datetime(book.get('time_exchange'))
-                    if pd.isna(book_time):
-                        continue
-                    
-                    # Only use data close to our target timestamp
-                    if abs((book_time - timestamp).total_seconds()) <= window:
-                        bid_vol += sum(float(level['size']) for level in book.get('bids', []))
-                        ask_vol += sum(float(level['size']) for level in book.get('asks', []))
-                        count += 1
-                    
-                except (KeyError, TypeError, ValueError) as e:
-                    print(f"Skipping invalid book entry: {str(e)}")
-                    continue
-
-            if count == 0:
-                return None
+                bid_vol = 0
+                ask_vol = 0
+                count = 0
                 
-            return {
-                'time': timestamp,
-                'delta': bid_vol - ask_vol,
-                'bid_vol': bid_vol,
-                'ask_vol': ask_vol
-            }
+                pbar.set_description("Processing order book entries...")
+                pbar.total = len(book_data)
+                
+                for book in tqdm(book_data, desc="Processing", leave=False):
+                    try:
+                        if not isinstance(book, dict) or 'time_exchange' not in book:
+                            continue
+                            
+                        book_time = pd.to_datetime(book.get('time_exchange'))
+                        if pd.isna(book_time):
+                            continue
+                        
+                        # Only use data close to our target timestamp
+                        if abs((book_time - timestamp).total_seconds()) <= window:
+                            bid_vol += sum(float(level['size']) for level in book.get('bids', []))
+                            ask_vol += sum(float(level['size']) for level in book.get('asks', []))
+                            count += 1
+                        
+                    except (KeyError, TypeError, ValueError) as e:
+                        print(f"Skipping invalid book entry: {str(e)}")
+                        continue
+
+                if count == 0:
+                    return None
+                    
+                return {
+                    'time': timestamp,
+                    'delta': bid_vol - ask_vol,
+                    'bid_vol': bid_vol,
+                    'ask_vol': ask_vol
+                }
             
         except requests.exceptions.RequestException as e:
             print(f"Failed to fetch order book at {timestamp}: {str(e)}")
