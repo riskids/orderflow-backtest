@@ -8,14 +8,33 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     
     Args:
         df: DataFrame with columns ['high', 'low', 'close', 'volume']
+        Must be sorted by time ascending
         
     Returns:
         DataFrame with added 'vwap' column
     """
+    df = df.sort_index()
     df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-    df['cumulative_vp'] = df.groupby(pd.Grouper(freq='D'))['typical_price'].cumsum()
+    
+    # Calculate cumulative typical price * volume per day
+    df['cumulative_vp'] = (df['typical_price'] * df['volume']).groupby(pd.Grouper(freq='D')).cumsum()
     df['cumulative_vol'] = df.groupby(pd.Grouper(freq='D'))['volume'].cumsum()
-    df['vwap'] = df['cumulative_vp'] / df['cumulative_vol']
+    
+    # Debug print sample data
+    sample = df.iloc[-5:] if len(df) > 5 else df
+    print("\nVWAP Calculation Debug:")
+    print(sample[['high', 'low', 'close', 'volume', 'typical_price', 'cumulative_vp', 'cumulative_vol']])
+    
+    # Handle days with no volume
+    valid_volume = df['cumulative_vol'] > 0
+    df['vwap'] = np.where(
+        valid_volume,
+        df['cumulative_vp'] / df['cumulative_vol'],
+        df['typical_price']  # Fallback to typical price if no volume
+    )
+    
+    print("\nFinal VWAP Sample:")
+    print(df[['close', 'vwap']].tail())
     return df
 
 def calculate_volume_profile(df: pd.DataFrame, bins: int = 20) -> Tuple[float, float, float]:

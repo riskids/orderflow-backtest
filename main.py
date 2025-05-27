@@ -9,8 +9,9 @@ from config.constants import START_DATE, END_DATE
 
 def get_strategy(choice: int):
     """Get strategy instance based on user choice"""
+    from data.fetcher import OrderBookFetcher
     strategies = {
-        1: RangePOIStrategy(),
+        1: RangePOIStrategy(fetcher=OrderBookFetcher()),
     }
     return strategies.get(choice)
 
@@ -25,8 +26,8 @@ def run_strategy(df: pd.DataFrame, strategy) -> pd.DataFrame:
     
     return df
 
-def get_market_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Get market data with caching support"""
+def get_market_data() -> Tuple[pd.DataFrame, None]:
+    """Get market data with caching support (only OHLCV, order book fetched on-demand)"""
     start_str, end_str = get_date_range_str(START_DATE, END_DATE)
     
     # Check cache for OHLCV data
@@ -39,17 +40,7 @@ def get_market_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
         if ohlcv_df is not None:
             save_to_cache(ohlcv_df, 'ohlcv', start_str, end_str)
     
-    # Check cache for order book data
-    if check_cache('orderbook', start_str, end_str):
-        print("Loading order book data from cache...")
-        order_book_df = load_from_cache('orderbook', start_str, end_str)
-    else:
-        print("Fetching order book data from API...")
-        order_book_df = fetch_order_book_data()
-        if order_book_df is not None:
-            save_to_cache(order_book_df, 'orderbook', start_str, end_str)
-    
-    return ohlcv_df, order_book_df
+    return ohlcv_df, None
 
 def main():
     try:

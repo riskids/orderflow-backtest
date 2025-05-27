@@ -40,6 +40,67 @@ def fetch_ohlcv_data() -> Optional[pd.DataFrame]:
         print(f"OHLCV API request failed: {str(e)}")
         return None
 
+class OrderBookFetcher:
+    def __init__(self):
+        pass
+        
+    def fetch_order_book_data_at_time(self, timestamp: pd.Timestamp, window: int = 300) -> Optional[Dict]:
+        """
+        Fetch order book data at specific timestamp with surrounding window (in seconds)
+        Returns single data point with delta, bid_vol, ask_vol
+        """
+        start_time = timestamp - pd.Timedelta(seconds=window)
+        end_time = timestamp + pd.Timedelta(seconds=window)
+        
+        url = f"https://rest.coinapi.io/v1/orderbooks/{SYMBOL}/history?limit=1000&time_start={start_time.isoformat()}&time_end={end_time.isoformat()}"
+        
+        try:
+            response = requests.get(url, headers=HEADERS)
+            response.raise_for_status()
+            book_data = response.json()
+
+            if not isinstance(book_data, list):
+                print(f"Unexpected data format for {timestamp}")
+                return None
+
+            bid_vol = 0
+            ask_vol = 0
+            count = 0
+            
+            for book in book_data:
+                try:
+                    if not isinstance(book, dict) or 'time_exchange' not in book:
+                        continue
+                        
+                    book_time = pd.to_datetime(book.get('time_exchange'))
+                    if pd.isna(book_time):
+                        continue
+                    
+                    # Only use data close to our target timestamp
+                    if abs((book_time - timestamp).total_seconds()) <= window:
+                        bid_vol += sum(float(level['size']) for level in book.get('bids', []))
+                        ask_vol += sum(float(level['size']) for level in book.get('asks', []))
+                        count += 1
+                    
+                except (KeyError, TypeError, ValueError) as e:
+                    print(f"Skipping invalid book entry: {str(e)}")
+                    continue
+
+            if count == 0:
+                return None
+                
+            return {
+                'time': timestamp,
+                'delta': bid_vol - ask_vol,
+                'bid_vol': bid_vol,
+                'ask_vol': ask_vol
+            }
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to fetch order book at {timestamp}: {str(e)}")
+            return None
+
+
 def fetch_order_book_data(batch_size: int = 20000, hours_per_batch: int = 3) -> Optional[pd.DataFrame]:
     """Fetch order book data with memory-efficient batches"""
     cvd_rows = []
@@ -112,12 +173,7 @@ def fetch_order_book_data(batch_size: int = 20000, hours_per_batch: int = 3) -> 
 
 def merge_market_data(ohlcv_df: pd.DataFrame, order_book_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     """Merge OHLCV and CVD data"""
-    if order_book_df is not None:
-        ohlcv_df = ohlcv_df.join(order_book_df, how='left')
-        ohlcv_df['delta'] = ohlcv_df['delta'].fillna(0)
-    else:
-        print("Warning: No valid order book data - using random CVD")
-        ohlcv_df['delta'] = np.random.uniform(-100, 100, len(ohlcv_df))
-    
-    ohlcv_df['cvd'] = ohlcv_df['delta'].cumsum()
+    # Initialize delta column with zeros - will be updated by strategy
+    ohlcv_df['delta'] = 0
+    ohlcv_df['cvd'] = 0
     return ohlcv_df
